@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+
+# Virtual environment
+venv/
+env/
+
+# Django
+*.log
+*.pot
+*.pyc
+db.sqlite3
+/media
+/staticfiles
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Environment variables
+.env
+
+# Pre-commit
+.pre-commit-config.yaml.bak
+.pre-commit-config.yaml
+.pre-commit-hooks.yaml
+.pre-commit/
+.pre-commit-cache/
