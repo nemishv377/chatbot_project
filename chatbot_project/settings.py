@@ -42,6 +42,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 # ex(cricket, hospital, general, etc..)
 PROMPT_DOMAIN = os.getenv("PROMPT_DOMAIN", "")
 
+PLATFORM_NAME = os.getenv("PLATFORM_NAME", "")
+
 # Log file directory configuration
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 
@@ -91,6 +93,8 @@ TEMPLATES = [
 STATIC_URL = "static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 
+MEDIA_URL = "/media/"
+MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
 WSGI_APPLICATION = "chatbot_project.wsgi.application"
 

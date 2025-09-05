@@ -16,3 +16,12 @@ class MessageBy(models.TextChoices):
 
     USER = "USER", "User"
     ASSISTANT = "ASSISTANT", "Assistant"
+
+
+class SourceType(models.TextChoices):
+    FILE = "file", "File Upload"  # PDFs, Word, Excel, CSV, etc.
+    IMAGE = "image", "Image File"  # JPG, PNG, TIFF, etc.
+    URL = "url", "Web URL"  # Web page
+    GOOGLE_DOC = "gdoc", "Google Doc"
+    GOOGLE_SHEET = "gsheet", "Google Sheet"
+    OTHER = "other", "Other"

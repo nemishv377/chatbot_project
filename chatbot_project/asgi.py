@@ -9,6 +9,7 @@ https://docs.djangoproject.com/en/5.1/howto/deployment/asgi/
 
 import os
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from django.core.asgi import get_asgi_application
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "chatbot_project.settings")

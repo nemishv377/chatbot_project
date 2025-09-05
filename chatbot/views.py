@@ -190,3 +190,228 @@ class ChatbotView(APIView):
                 data={"message": messages.SOMETHING_WENT_WRONG},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+
+import os
+import uuid
+
+from django.conf import settings
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
+from django.db import transaction
+from django.utils import timezone
+from groq import Groq
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from chatbot.serializer.custom_chatbot_serializers import ChatRequestSerializer
+from chatbot.serializer.custom_chatbot_serializers import FileUploadSerializer
+
+from .models import Chat
+from .models import ChatSession
+from .models import IngestedDocument
+from .models import MessageBy
+from .rag_utils import get_relevant_chunks
+from .rag_utils import ingest_file_to_chroma
+
+
+# -------------------------
+# File Upload & Ingest
+# -------------------------
+class DocumentUploadView(APIView):
+    """
+    POST /api/rag/upload/
+    Form-Data: file=<binary>, source=<optional tag>
+    Saves to MEDIA_ROOT, extracts text (OCR for images), chunks, embeds to ChromaDB.
+    """
+
+    def post(self, request, *args, **kwargs):
+        serializer = FileUploadSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        up_file = serializer.validated_data["file"]
+        source = serializer.validated_data.get("source") or up_file.name
+
+        # Save file to MEDIA
+        subdir = "uploads"
+        save_path = os.path.join(subdir, up_file.name)
+        full_path = default_storage.save(save_path, ContentFile(up_file.read()))
+        abs_path = os.path.join(settings.MEDIA_ROOT, full_path)
+
+        # Ingest → Chroma
+        try:
+            num_chunks, extractor = ingest_file_to_chroma(
+                abs_path, source_name=up_file.name
+            )
+            doc = IngestedDocument.objects.create(
+                file=full_path,
+                original_name=up_file.name,
+                mime_type=up_file.content_type or "",
+                size_bytes=up_file.size or 0,
+                num_chunks=num_chunks,
+                status="processed" if num_chunks > 0 else "error",
+                error_message=""
+                if num_chunks > 0
+                else "No text found or OCR unavailable",
+            )
+            return Response(
+                {
+                    "id": str(doc.id),
+                    "file": doc.original_name,
+                    "stored_at": doc.file.url
+                    if hasattr(doc.file, "url")
+                    else doc.file.name,
+                    "mime": doc.mime_type,
+                    "size": doc.size_bytes,
+                    "num_chunks": doc.num_chunks,
+                    "extractor": extractor,
+                    "status": doc.status,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        except Exception as e:
+            doc = IngestedDocument.objects.create(
+                file=full_path,
+                original_name=up_file.name,
+                mime_type=up_file.content_type or "",
+                size_bytes=up_file.size or 0,
+                num_chunks=0,
+                status="error",
+                error_message=str(e),
+            )
+            return Response(
+                {
+                    "id": str(doc.id),
+                    "file": doc.original_name,
+                    "status": "error",
+                    "error": str(e),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+# -------------------------
+# Chat (RAG)
+# -------------------------
+class CustomChatbotView(APIView):
+    """
+    POST /api/rag/chat/
+    Body: { "message": "...", "session_id": "..."? }
+    Retrieval-augmented answer based only on uploaded documents.
+    """
+
+    def post(self, request, *args, **kwargs):
+        try:
+            with transaction.atomic():
+                serializer = ChatRequestSerializer(data=request.data)
+                if not serializer.is_valid():
+                    return Response(
+                        serializer.errors, status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                user_message = serializer.validated_data["message"]
+                session_id = serializer.validated_data.get("session_id")
+                response = {}
+
+                chat_session, created = ChatSession.objects.get_or_create(
+                    session_id=session_id or str(uuid.uuid4()),
+                    defaults={
+                        "label": user_message,
+                        "last_interaction": timezone.now(),
+                    },
+                )
+                if created:
+                    response["session_id"] = chat_session.session_id
+
+                # Retrieve context from docs
+                retrieved_chunks = get_relevant_chunks(user_message, top_k=20)
+                messages_for_llm = [
+                    {
+                        "role": "system",
+                        "content": f"You are a helpful assistant for {settings.PLATFORM_NAME}.",
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Here is the relevant documentation:\n{retrieved_chunks}\n\nQuestion: {user_message}",
+                    },
+                ]
+
+                # Save user message
+                Chat.objects.create(
+                    session=chat_session,
+                    message_by=MessageBy.USER,
+                    message=user_message,
+                )
+
+                # Build conversation history
+                chats = Chat.objects.filter(session=chat_session).order_by("id")
+                conversation_history = [
+                    {"role": chat.message_by.lower(), "content": chat.message}
+                    for chat in chats
+                ]
+                conversation_history.append(
+                    {"role": MessageBy.USER.value.lower(), "content": user_message}
+                )
+                system_prompt = f"""
+                    You are QuickAssist, a helpful assistant for {settings.PLATFORM_NAME}.
+
+                    Rules:
+                    - Only use the provided knowledge from the retrieved documents: {retrieved_chunks}.
+                    - If the retrieved knowledge is empty OR the user question is not related to {settings.PLATFORM_NAME},
+                    do NOT answer using general knowledge.
+                    - Instead, politely redirect the user while echoing their input.
+                    Example format: "It seems like you might be asking about something unrelated to {settings.PLATFORM_NAME}.
+                    If you're referring to a {settings.PLATFORM_NAME}-specific issue or topic, could you please provide more details?"
+                    - Never provide unrelated technical explanations (like Python, general programming, etc.).
+                    - Keep responses simple, professional, and conversational.
+                    """
+
+                messages_for_llm = [
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": f"Here is the relevant documentation:\n{retrieved_chunks}\n\nQuestion: {user_message}",
+                    },
+                ]
+
+                # messages_for_llm.append(
+                #     {"role": "system", "content": system_prompt},
+                #     *conversation_history,
+                # )
+
+                client = Groq(api_key=settings.GROQ_API_KEY)
+                chat_completion = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=messages_for_llm,
+                    temperature=0.7,
+                    max_tokens=10000,
+                )
+                ai_reply = chat_completion.choices[0].message.content
+
+                # Optional: sanitize if model slips (hard-guard)
+                # DISALLOWED_HINTS = ["i am not allowed", "as an ai", "as a language model",
+                #                     "my responses come from", "the system", "who built me", "openai", "meta"]
+                # if any(h in ai_reply.lower() for h in DISALLOWED_HINTS):
+                #     ai_reply = "I don’t have information on that."
+
+                response["answer"] = ai_reply
+
+                # Save assistant response
+                Chat.objects.create(
+                    session=chat_session,
+                    message_by=MessageBy.ASSISTANT,
+                    message=ai_reply,
+                )
+                chat_session.last_interaction = timezone.now()
+                chat_session.save()
+                print(conversation_history)
+
+                return Response({"data": response}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response(
+                {"message": "Something went wrong", "error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )

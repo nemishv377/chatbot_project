@@ -31,3 +31,7 @@ db.sqlite3
 .pre-commit-hooks.yaml
 .pre-commit/
 .pre-commit-cache/
+
+
+/chroma_db
+/logs
