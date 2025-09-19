@@ -1,20 +1,28 @@
+import json
 import os
 import uuid
 
+import markdown2
 from django.conf import settings
 from django.db import transaction
+from django.http import JsonResponse
+from django.shortcuts import render
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 from groq import Groq
-from rest_framework import status
-from rest_framework.response import Response
-from rest_framework.views import APIView
 
 from chatbot.models import Chat
 from chatbot.models import ChatSession
-from chatbot.serializer.groq_chatbot_serializers import ChatRequestSerializer
 from chatbot_project import messages
 from chatbot_project.enums import MessageBy
 from chatbot_project.logging_handler import set_log_file_handler
+
+from .models import Chat
+from .models import ChatSession
+from .models import MessageBy
+from .utils import build_prompt
+from .utils import get_chroma_collection
+from .utils import retrieve_relevant_chunks
 
 # -------------------------
 # Logger Setup
@@ -56,49 +64,138 @@ DOMAIN_PROMPTS = {
 }
 
 
-class ChatbotView(APIView):
+@csrf_exempt
+def home_page(request):
     """
-    API view for a ChatGPT-like chatbot using Groq.
+    Render the chatbot home page.
 
-    This view handles:
-    - User messages
-    - Session-based conversation history
-    - Domain-specific prompts
-    - AI responses via Groq API
+    This view displays the entry point for the chatbot feature,
+    showing navigation links to both chatbot types (e.g., general
+    chatbot and knowledge-based chatbot). It does not handle any
+    form submissions or data processing.
 
-    Workflow:
-    1. Validate request payload with ChatRequestSerializer
-    2. Create a new ChatSession if `session_id` is not provided
-       - On the first query, a new `session_id` is generated and returned in the response
-       - For subsequent queries in the same conversation, the client should provide this `session_id`
-       - If no `session_id` is provided, a new session is created and considered a new chat
-    3. Retrieve previous chats for the session
-    4. Append the current user message
-    5. Prepare system prompt using DOMAIN_PROMPTS for the selected domain
-    6. Call Groq API to generate AI response
-    7. Store the assistant's response in the database
-    8. Return the AI response along with session information
+    Returns:
+        HttpResponse: Rendered HTML page (chatbot/home.html).
     """
+    return render(request, "chatbot/home.html")
 
-    def post(self, request, *args, **kwargs):
+
+@csrf_exempt
+def general_chat_page(request):
+    """
+    Render the general chatbot UI.
+
+    This view serves the frontend template for the general chatbot,
+    which behaves like ChatGPT. It provides the chat interface where
+    users can start new conversations or continue an existing one
+    based on their session_id.
+
+    Returns:
+        HttpResponse: Rendered HTML page (chatbot/general_chat.html).
+    """
+    return render(request, "chatbot/general_chat.html")
+
+
+@csrf_exempt
+def general_chatbot_session_view(request, session_id=None):
+    """
+    Session-based view for the general chatbot (ChatGPT-like).
+
+    This endpoint supports both retrieving existing chat history
+    and sending new user messages within a session.
+
+    **Supported Methods**:
+        - GET:
+            • If `session_id` is provided → fetch all chat messages for that session.
+            • If no `session_id` is provided → create a new session and return an empty history.
+
+        - POST:
+            • Accepts a user message and optional `session_id`.
+            • If no `session_id` is provided, a new chat session is created.
+            • Stores the user message in the database.
+            • Prepares a system prompt (from DOMAIN_PROMPTS).
+            • Retrieves conversation history for context.
+            • Calls the Groq API to generate an AI response.
+            • Saves the assistant’s response in the database.
+            • Returns the AI response and current session ID.
+
+    **Workflow for POST**:
+        1. Validate the incoming request payload.
+        2. Create or retrieve the associated ChatSession.
+        3. Save the user’s message.
+        4. Build full conversation history.
+        5. Prepend the system prompt for the LLM.
+        6. Query the Groq model for a response.
+        7. Convert the response to HTML (markdown → HTML).
+        8. Save and return the AI’s reply with the session ID.
+
+    Args:
+        request (HttpRequest): Incoming HTTP request (GET or POST).
+        session_id (str, optional): Chat session identifier.
+
+    Returns:
+        JsonResponse:
+            • GET → {"history": [...], "session_id": str}
+            • POST → {"answer": str (HTML), "session_id": str}
+            • On error → {"error": str}
+    """
+    # ------------------------------------------------------------------
+    # GET → return history
+    # ------------------------------------------------------------------
+    if request.method == "GET":
+        if session_id:
+            chat_messages = Chat.objects.filter(
+                session__session_id=session_id
+            ).order_by("created_at")
+            history = [
+                {"role": m.message_by.lower(), "message": m.message}
+                for m in chat_messages
+            ]
+            return JsonResponse({"history": history, "session_id": session_id})
+        else:
+            # create new session
+            new_session_id = str(uuid.uuid4())
+            ChatSession.objects.create(session_id=new_session_id)
+            return JsonResponse({"history": [], "session_id": new_session_id})
+
+    # ------------------------------------------------------------------
+    # POST → process message
+    # ------------------------------------------------------------------
+    elif request.method == "POST":
+        """
+        Handle incoming chat messages and generate AI responses.
+
+        Workflow:
+        1. Parse and validate the request payload.
+        2. Create or retrieve a ChatSession:
+        - If no `session_id` is provided, start a new session.
+        - Otherwise, continue the existing conversation.
+        3. Retrieve and persist conversation history.
+        4. Build the full message sequence with:
+        - A domain-specific system prompt (from DOMAIN_PROMPTS).
+        - Previous chat history for context.
+        - The current user message.
+        5. Send the conversation to the Groq API for an AI-generated response.
+        6. Convert the AI response from Markdown to HTML.
+        7. Save the assistant response in the database.
+        8. Return the AI response and session_id in a JSON response.
+
+        Returns:
+            JsonResponse: {
+                "answer": <str>  # AI response as HTML,
+                "session_id": <str>  # Current or newly created session ID
+            }
+        """
+
+        # def post(self, request, *args, **kwargs):
         try:
             with transaction.atomic():
-                # -------------------------
                 # Validate input
-                # -------------------------
-                serializer = ChatRequestSerializer(data=request.data)
-                if not serializer.is_valid():
-                    return Response(
-                        serializer.errors, status=status.HTTP_400_BAD_REQUEST
-                    )
+                payload = json.loads(request.body)
+                user_message = payload.get("question", "").strip()
+                session_id = payload.get("session_id")
 
-                user_message = serializer.validated_data["message"]
-                session_id = serializer.validated_data.get("session_id")
-                response = {}
-
-                # -------------------------
                 # Get or create chat session
-                # -------------------------
                 chat_session, created = ChatSession.objects.get_or_create(
                     session_id=session_id or str(uuid.uuid4()),
                     defaults={
@@ -107,35 +204,23 @@ class ChatbotView(APIView):
                     },
                 )
 
-                # Include session_id in response only if newly created
-                if created:
-                    response = {"session_id": chat_session.session_id}
-
-                # -------------------------
                 # Prepare system prompt
-                # -------------------------
                 prompt_domain = getattr(settings, "PROMPT_DOMAIN", "general")
                 system_prompt = DOMAIN_PROMPTS.get(
                     prompt_domain, DOMAIN_PROMPTS[settings.PROMPT_DOMAIN]
                 )
 
-                # -------------------------
                 # Retrieve previous chats
-                # -------------------------
                 chats = Chat.objects.filter(session=chat_session)
 
-                # -------------------------
                 # Save current user message
-                # -------------------------
                 Chat.objects.create(
                     session=chat_session,
                     message_by=MessageBy.USER,
                     message=user_message,
                 )
 
-                # -------------------------
                 # Build conversation history
-                # -------------------------
                 conversation_history = [
                     {"role": chat.message_by.lower(), "content": chat.message}
                     for chat in chats
@@ -148,9 +233,7 @@ class ChatbotView(APIView):
                     {"role": "system", "content": system_prompt}
                 ] + conversation_history
 
-                # -------------------------
                 # Call Groq API for AI response
-                # -------------------------
                 client = Groq(api_key=settings.GROQ_API_KEY)
                 chat_completion = client.chat.completions.create(
                     model="llama-3.1-8b-instant",
@@ -160,11 +243,11 @@ class ChatbotView(APIView):
                 )
 
                 ai_reply = chat_completion.choices[0].message.content
-                response["answer"] = ai_reply
 
-                # -------------------------
+                # convert markdown to html
+                answer_html = markdown2.markdown(ai_reply)
+
                 # Save assistant response
-                # -------------------------
                 Chat.objects.create(
                     session=chat_session,
                     message_by=MessageBy.ASSISTANT,
@@ -176,242 +259,134 @@ class ChatbotView(APIView):
                 chat_session.last_interaction = timezone.now()
                 chat_session.save()
 
-                # -------------------------
-                # Return response
-                # -------------------------
-                return Response(
-                    data={"data": response},
-                    status=status.HTTP_200_OK,
+                return JsonResponse(
+                    {
+                        "answer": answer_html,
+                        "session_id": chat_session.session_id,
+                    },
+                    status=200,
                 )
 
         except Exception as e:
             chatbot_logger.error(f"{e}, {messages.SOMETHING_WENT_WRONG}")
-            return Response(
-                data={"message": messages.SOMETHING_WENT_WRONG},
-                status=status.HTTP_400_BAD_REQUEST,
+            return JsonResponse(
+                {"error": "Something went wrong. Please try again later."},
+                status=400,
             )
 
 
-import os
-import uuid
-
-from django.conf import settings
-from django.core.files.base import ContentFile
-from django.core.files.storage import default_storage
-from django.db import transaction
-from django.utils import timezone
-from groq import Groq
-from rest_framework import status
-from rest_framework.response import Response
-from rest_framework.views import APIView
-
-from chatbot.serializer.custom_chatbot_serializers import ChatRequestSerializer
-from chatbot.serializer.custom_chatbot_serializers import FileUploadSerializer
-
-from .models import Chat
-from .models import ChatSession
-from .models import IngestedDocument
-from .models import MessageBy
-from .rag_utils import get_relevant_chunks
-from .rag_utils import ingest_file_to_chroma
-
-
-# -------------------------
-# File Upload & Ingest
-# -------------------------
-class DocumentUploadView(APIView):
+# UI view
+@csrf_exempt
+def assistant_chat_page(request):
     """
-    POST /api/rag/upload/
-    Form-Data: file=<binary>, source=<optional tag>
-    Saves to MEDIA_ROOT, extracts text (OCR for images), chunks, embeds to ChromaDB.
+    Render the chat UI with optional history based on session_id.
     """
+    return render(request, "chatbot/chat.html")
 
-    def post(self, request, *args, **kwargs):
-        serializer = FileUploadSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        up_file = serializer.validated_data["file"]
-        source = serializer.validated_data.get("source") or up_file.name
+@csrf_exempt
+def assistant_chatbot_view(request, session_id=None):
+    """
+    Returns JSON chat history.
+    If no session_id, create a new session and return empty history with new session_id.
+    """
+    # ------------------------------------------------------------------
+    # GET → return history
+    # ------------------------------------------------------------------
+    if request.method == "GET":
+        print(session_id)
+        if session_id:
+            messages = Chat.objects.filter(session__session_id=session_id).order_by(
+                "created_at"
+            )
+            history = [
+                {"role": m.message_by.lower(), "message": m.message} for m in messages
+            ]
+            return JsonResponse({"history": history, "session_id": session_id})
+        else:
+            # create new session
+            new_session_id = str(uuid.uuid4())
+            ChatSession.objects.create(session_id=new_session_id)
+            return JsonResponse({"history": [], "session_id": new_session_id})
 
-        # Save file to MEDIA
-        subdir = "uploads"
-        save_path = os.path.join(subdir, up_file.name)
-        full_path = default_storage.save(save_path, ContentFile(up_file.read()))
-        abs_path = os.path.join(settings.MEDIA_ROOT, full_path)
-
-        # Ingest → Chroma
+    # ------------------------------------------------------------------
+    # POST → process message
+    # ------------------------------------------------------------------
+    elif request.method == "POST":
         try:
-            num_chunks, extractor = ingest_file_to_chroma(
-                abs_path, source_name=up_file.name
-            )
-            doc = IngestedDocument.objects.create(
-                file=full_path,
-                original_name=up_file.name,
-                mime_type=up_file.content_type or "",
-                size_bytes=up_file.size or 0,
-                num_chunks=num_chunks,
-                status="processed" if num_chunks > 0 else "error",
-                error_message=""
-                if num_chunks > 0
-                else "No text found or OCR unavailable",
-            )
-            return Response(
-                {
-                    "id": str(doc.id),
-                    "file": doc.original_name,
-                    "stored_at": doc.file.url
-                    if hasattr(doc.file, "url")
-                    else doc.file.name,
-                    "mime": doc.mime_type,
-                    "size": doc.size_bytes,
-                    "num_chunks": doc.num_chunks,
-                    "extractor": extractor,
-                    "status": doc.status,
-                },
-                status=status.HTTP_201_CREATED,
-            )
-        except Exception as e:
-            doc = IngestedDocument.objects.create(
-                file=full_path,
-                original_name=up_file.name,
-                mime_type=up_file.content_type or "",
-                size_bytes=up_file.size or 0,
-                num_chunks=0,
-                status="error",
-                error_message=str(e),
-            )
-            return Response(
-                {
-                    "id": str(doc.id),
-                    "file": doc.original_name,
-                    "status": "error",
-                    "error": str(e),
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            payload = json.loads(request.body)
+            user_msg = payload.get("question", "").strip()
+            session_id = payload.get("session_id")
+            print(payload)
+            if not user_msg:
+                return JsonResponse({"error": "Empty message"}, status=400)
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
 
+        # ------------------------------------------------------------------
+        # 1️⃣ Get or create session
+        # ------------------------------------------------------------------
+        chat_session, created = ChatSession.objects.get_or_create(
+            session_id=session_id or str(uuid.uuid4()),
+            defaults={"label": user_msg, "last_interaction": timezone.now()},
+        )
+        if created:
+            session_id = chat_session.session_id
 
-# -------------------------
-# Chat (RAG)
-# -------------------------
-class CustomChatbotView(APIView):
-    """
-    POST /api/rag/chat/
-    Body: { "message": "...", "session_id": "..."? }
-    Retrieval-augmented answer based only on uploaded documents.
-    """
+        # ------------------------------------------------------------------
+        # 1️⃣ Retrieve relevant chunks from ChromaDB
+        # ------------------------------------------------------------------
+        collection = get_chroma_collection()
+        relevant_chunks = retrieve_relevant_chunks(collection, user_msg, top_k=5)
 
-    def post(self, request, *args, **kwargs):
-        try:
-            with transaction.atomic():
-                serializer = ChatRequestSerializer(data=request.data)
-                if not serializer.is_valid():
-                    return Response(
-                        serializer.errors, status=status.HTTP_400_BAD_REQUEST
-                    )
+        # ------------------------------------------------------------------
+        # 3️⃣ Save user message
+        # ------------------------------------------------------------------
+        Chat.objects.create(
+            session=chat_session, message_by=MessageBy.USER, message=user_msg
+        )
 
-                user_message = serializer.validated_data["message"]
-                session_id = serializer.validated_data.get("session_id")
-                response = {}
+        # ------------------------------------------------------------------
+        # 4️⃣ Build prompt including previous conversation
+        # ------------------------------------------------------------------
+        prompt = build_prompt(user_msg, relevant_chunks, chat_session=chat_session)
 
-                chat_session, created = ChatSession.objects.get_or_create(
-                    session_id=session_id or str(uuid.uuid4()),
-                    defaults={
-                        "label": user_message,
-                        "last_interaction": timezone.now(),
-                    },
-                )
-                if created:
-                    response["session_id"] = chat_session.session_id
+        # ------------------------------------------------------------------
+        # 3️⃣ Call Groq LLM
+        # ------------------------------------------------------------------
+        client = Groq(api_key=settings.GROQ_API_KEY)
+        # You can swap the model name – e.g. "llama3-70b-8192"
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",  # <-- change to the model you prefer
+            messages=prompt,
+            temperature=0.2,
+            max_tokens=1024,
+            stream=False,
+        )
 
-                # Retrieve context from docs
-                retrieved_chunks = get_relevant_chunks(user_message, top_k=20)
-                messages_for_llm = [
-                    {
-                        "role": "system",
-                        "content": f"You are a helpful assistant for {settings.PLATFORM_NAME}.",
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Here is the relevant documentation:\n{retrieved_chunks}\n\nQuestion: {user_message}",
-                    },
-                ]
+        # after you get LLM answer
+        answer = response.choices[0].message.content
 
-                # Save user message
-                Chat.objects.create(
-                    session=chat_session,
-                    message_by=MessageBy.USER,
-                    message=user_message,
-                )
+        # convert markdown to html
+        answer_html = markdown2.markdown(answer)
 
-                # Build conversation history
-                chats = Chat.objects.filter(session=chat_session).order_by("id")
-                conversation_history = [
-                    {"role": chat.message_by.lower(), "content": chat.message}
-                    for chat in chats
-                ]
-                conversation_history.append(
-                    {"role": MessageBy.USER.value.lower(), "content": user_message}
-                )
-                system_prompt = f"""
-                    You are QuickAssist, a helpful assistant for {settings.PLATFORM_NAME}.
+        # ------------------------------------------------------------------
+        # 6️⃣ Save assistant response # save html version
+        # ------------------------------------------------------------------
+        # save html version
+        Chat.objects.create(
+            session=chat_session, message_by=MessageBy.ASSISTANT, message=answer_html
+        )
+        chat_session.last_interaction = timezone.now()
+        chat_session.save()
 
-                    Rules:
-                    - Only use the provided knowledge from the retrieved documents: {retrieved_chunks}.
-                    - If the retrieved knowledge is empty OR the user question is not related to {settings.PLATFORM_NAME},
-                    do NOT answer using general knowledge.
-                    - Instead, politely redirect the user while echoing their input.
-                    Example format: "It seems like you might be asking about something unrelated to {settings.PLATFORM_NAME}.
-                    If you're referring to a {settings.PLATFORM_NAME}-specific issue or topic, could you please provide more details?"
-                    - Never provide unrelated technical explanations (like Python, general programming, etc.).
-                    - Keep responses simple, professional, and conversational.
-                    """
-
-                messages_for_llm = [
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": f"Here is the relevant documentation:\n{retrieved_chunks}\n\nQuestion: {user_message}",
-                    },
-                ]
-
-                # messages_for_llm.append(
-                #     {"role": "system", "content": system_prompt},
-                #     *conversation_history,
-                # )
-
-                client = Groq(api_key=settings.GROQ_API_KEY)
-                chat_completion = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
-                    messages=messages_for_llm,
-                    temperature=0.7,
-                    max_tokens=10000,
-                )
-                ai_reply = chat_completion.choices[0].message.content
-
-                # Optional: sanitize if model slips (hard-guard)
-                # DISALLOWED_HINTS = ["i am not allowed", "as an ai", "as a language model",
-                #                     "my responses come from", "the system", "who built me", "openai", "meta"]
-                # if any(h in ai_reply.lower() for h in DISALLOWED_HINTS):
-                #     ai_reply = "I don’t have information on that."
-
-                response["answer"] = ai_reply
-
-                # Save assistant response
-                Chat.objects.create(
-                    session=chat_session,
-                    message_by=MessageBy.ASSISTANT,
-                    message=ai_reply,
-                )
-                chat_session.last_interaction = timezone.now()
-                chat_session.save()
-                print(conversation_history)
-
-                return Response({"data": response}, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            return Response(
-                {"message": "Something went wrong", "error": str(e)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # ------------------------------------------------------------------
+        # 7️⃣ Return JSON
+        # ------------------------------------------------------------------
+        return JsonResponse(
+            {
+                "answer": answer_html,
+                "session_id": chat_session.session_id,
+            },
+            status=200,
+        )

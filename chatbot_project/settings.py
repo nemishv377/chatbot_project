@@ -38,6 +38,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # Groq API key
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
+# ChromaDB
+BASE_DIR = Path(__file__).resolve().parent.parent
+CHROMA_PERSIST_DIR = os.path.join(BASE_DIR, "chroma_db")
+
 # Set the specific domain from where it answer
 # ex(cricket, hospital, general, etc..)
 PROMPT_DOMAIN = os.getenv("PROMPT_DOMAIN", "")
@@ -90,11 +94,10 @@ TEMPLATES = [
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
 
-STATIC_URL = "static/"
-STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+STATIC_URL = "/static/"
+STATICFILES_DIRS = [BASE_DIR / "static"]
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
-MEDIA_URL = "/media/"
-MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
 WSGI_APPLICATION = "chatbot_project.wsgi.application"
 

@@ -1,11 +1,24 @@
 from django.urls import path
 
-from .views import ChatbotView
-from .views import CustomChatbotView
-from .views import DocumentUploadView
+from chatbot import views
+from chatbot.views import assistant_chat_page
+from chatbot.views import assistant_chatbot_view
+from chatbot.views import general_chat_page
+from chatbot.views import general_chatbot_session_view
+from chatbot.views import home_page
 
 urlpatterns = [
-    path("", ChatbotView.as_view(), name="chatbot"),
-    path("custom/", CustomChatbotView.as_view(), name="custom-chatbot"),
-    path("rag/upload/", DocumentUploadView.as_view(), name="rag-upload"),
+    path("", home_page, name="home-page"),
+    path("general/", general_chat_page, name="general-chat-page"),
+    path(
+        "general/<str:session_id>/",
+        general_chatbot_session_view,
+        name="general-chat-history",
+    ),  # GET/POST
+    path("assistant/", assistant_chat_page, name="assistant-chat-page"),
+    path(
+        "assistant/<str:session_id>/",
+        assistant_chatbot_view,
+        name="assistant-chat-history",
+    ),  # GET/POST
 ]

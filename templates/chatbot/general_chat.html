@@ -1,0 +1,289 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>General Chatbot</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/milligram/1.4.1/milligram.min.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+
+  <style>
+    * {
+      margin: 0px;
+      padding: 0px;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: linear-gradient(100deg, #eaf6fb 50%, #f4e2ff 100%);
+      max-width: 50%;
+      margin: 2rem auto;
+      color: #222;
+    }
+
+    p, ol, pre,table,ul {
+      margin: 0px;
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 5rem;
+      font-size: 3rem;
+      font-weight: 700;
+      letter-spacing: .02rem;
+      color: #140c40;
+    }
+
+    h1 .gradient-text {
+      background: linear-gradient(90deg, #64c7ff, #b57be8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    #chat-box {
+      font-family: 'Inter', 'Roboto', 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', sans-serif;
+      height: 520px;
+      overflow-y: auto;
+      border: none;
+      border-radius: 18px;
+      padding: 1.5rem;
+      background: #fff;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 6px 24px rgba(80, 60, 150, 0.08);
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      transition: box-shadow 0.3s;
+    }
+
+    .msg {
+      display: flex;
+      align-items: flex-end;
+      gap: 0.7rem;
+    }
+
+    .msg.user {
+      justify-content: flex-end;
+    }
+
+    .msg.assistant {
+      justify-content: flex-start;
+    }
+
+    .bubble {
+      padding: 1rem 1.5rem;
+      border-radius: 22px;
+      max-width: 74%;
+      line-height: 1.5;
+      word-wrap: break-word;
+      font-size: 1.6rem;
+      animation: chatPop 0.3s;
+    }
+
+    @keyframes chatPop {
+      0% {transform: scale(0.9);}
+      100% {transform: scale(1);}
+    }
+
+    .msg.user .bubble {
+      background: linear-gradient(135deg, #65c1ff 0%, #b57be8 100%);
+      color: #fff;
+      border-bottom-right-radius: 8px;
+      border-bottom-left-radius: 22px;
+      box-shadow: 0 2px 10px rgba(101, 193, 255, 0.14);
+    }
+
+    .msg.assistant .bubble {
+      background: linear-gradient(120deg, #ecf0f1 60%, #f4e2ff 100%);
+      color: #32155a;
+      border-bottom-left-radius: 8px;
+      border-bottom-right-radius: 22px;
+      box-shadow: 0 2px 10px rgba(181, 123, 232, 0.09);
+    }
+
+    .avatar {
+      width: 38px;
+      height: 38px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #f4e2ff 0%, #65c1ff 100%);
+      border-radius: 50%;
+      margin: 0 0.5rem;
+      box-shadow: 0 2px 6px rgba(151, 120, 255, 0.09);
+      font-size: 22px;
+      color: #fff;
+    }
+
+    .spacer {
+      width: 38px;
+    }
+
+    #new-chat {
+      display: block;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 1.2rem;
+      color: #fff;
+      background: linear-gradient(90deg, #b57be8, #64c7ff);
+      border: none;
+      box-shadow: 0 4px 12px rgba(101, 193, 255, 0.2);
+      cursor: pointer;
+      transition: all 0.3s ease;
+      text-align: center;
+    }
+
+    #new-chat:hover {
+      background: linear-gradient(90deg, #b57be8, #64c7ff);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 16px rgba(101, 193, 255, 0.25);
+    }
+
+    #chat-form {
+      display: flex;
+      gap: 0.7rem;
+      position: sticky;
+      bottom: 0;
+      background: transparent;
+      padding: 0.7rem 0;
+    }
+
+    #question-input {
+      flex: 1;
+      border-radius: 9px;
+      background-color: white;
+      border: 1.5px solid #b57be8;
+      padding: 0.8rem;
+      font-size: 1.4rem;
+      transition: border-color 0.2s;
+    }
+
+    #question-input:focus {
+      border-color: #65c1ff;
+      outline: none;
+    }
+
+    button[type="submit"] {
+      border-radius: 9px !important;
+      font-weight: 700;
+      background: linear-gradient(90deg, #64c7ff, #b57be8);
+      color: #fff;
+      border: none;
+      padding: 0 2.1rem;
+      box-shadow: 0 2px 8px rgba(101,193,255,0.09);
+      transition: background 0.2s;
+    }
+
+    button[type="submit"]:hover {
+      background: linear-gradient(90deg, #b57be8, #64c7ff);
+    }
+
+    #chat-box::-webkit-scrollbar {
+      width: 7px;
+      background: transparent;
+    }
+
+    #chat-box::-webkit-scrollbar-thumb {
+      background-color: #e0d6f8;
+      border-radius: 6px;
+    }
+
+    /* Flex container for buttons */
+    #button-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin: 1rem 0 1.5rem 0; /* spacing above chat */
+    }
+
+    #back-btn {
+        display: block;
+        border-radius: 12px;
+        font-weight: 600;
+        font-size: 1.2rem;
+        color: #fff;
+        background: linear-gradient(90deg, #b57be8, #64c7ff);
+        border: none;
+        box-shadow: 0 4px 12px rgba(101, 193, 255, 0.2);
+        cursor: pointer;
+        transition: all 0.3s ease;
+        text-align: center;
+    }
+
+    #back-btn:hover {
+        background: linear-gradient(90deg, #64c7ff, #b57be8);
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(101, 193, 255, 0.25);
+    }
+
+    /* 🔔 Toast Notification */
+    #toast {
+      position: fixed;
+      top: 1.5rem;
+      right: 1.5rem;
+      background: #ff4d4f;
+      color: #fff;
+      padding: 1.5rem 2rem;   /* 🔹 More padding */
+      border-radius: 14px;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.2);
+      font-size: 1.6rem;        /* 🔹 Bigger text */
+      font-weight: 500;       /* 🔹 Stronger weight */
+      max-width: 420px;       /* 🔹 Allow more text space */
+      text-align: center;
+      line-height: 1.4;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-30px) scale(0.95);
+      transition: all 0.4s ease;
+      z-index: 9999;
+    }
+
+    #toast.show {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+
+  </style>
+</head>
+<body>
+  <!-- 🔔 Toast container -->
+  <div id="toast"></div>
+
+  <h1>📚 <span class="gradient-text">General Chatbot</span></h1>
+
+  <!-- Buttons container -->
+  <div id="button-bar">
+    <button id="back-btn">⬅ Back to Home</button>
+    <button id="new-chat" class="button-secondary">➕ Start New Chat</button>
+  </div>
+
+  <div id="chat-box">
+    {% for msg in history %}
+    <div class="msg {{ msg.role }}">
+        {{ msg.role }}
+        {% if msg.role == "assistant" %}
+            <div class="avatar">🤖tr</div>
+        {% else %}
+            <div class="spacer"></div>
+        {% endif %}
+
+        <div class="bubble">{{ msg.message|safe }}</div>
+
+        {% if msg.role == "user" %}
+            <div class="avatar">🧑hj</div>
+        {% else %}
+            <div class="spacer"></div>
+        {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+
+  <form id="chat-form" action="#" method="post" autocomplete="off">
+    <input type="text" id="question-input" placeholder="Ask something…" required />
+    <button type="submit" class="button-primary">Send</button>
+  </form>
+
+  <script src="{% static '/chatbot/general_chat.js' %}"></script>
+</body>
+</html>
