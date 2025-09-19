@@ -33,6 +33,15 @@ DEBUG = True
 
 ALLOWED_HOSTS = []
 
+# Groq API key
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+# Set the specific domain from where it answer
+# ex(cricket, hospital, general, etc..)
+PROMPT_DOMAIN = os.getenv("PROMPT_DOMAIN", "")
+
+PLATFORM_NAME = os.getenv("PLATFORM_NAME", "")
+
 # Log file directory configuration
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 
@@ -45,6 +54,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "chatbot",
 ]
 
 MIDDLEWARE = [
