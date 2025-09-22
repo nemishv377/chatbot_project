@@ -199,10 +199,7 @@ def general_chatbot_session_view(request, session_id=None):
                 )
 
                 # Prepare system prompt
-                prompt_domain = getattr(settings, "PROMPT_DOMAIN", "general")
-                system_prompt = DOMAIN_PROMPTS.get(
-                    prompt_domain, DOMAIN_PROMPTS[settings.PROMPT_DOMAIN]
-                )
+                system_prompt = DOMAIN_PROMPTS.get(settings.PROMPT_DOMAIN)
 
                 # Retrieve previous chats
                 chats = Chat.objects.filter(session=chat_session)
