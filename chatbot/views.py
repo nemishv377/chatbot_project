@@ -18,6 +18,10 @@ from chatbot_project import messages
 from chatbot_project.enums import MessageBy
 from chatbot_project.logging_handler import set_log_file_handler
 
+from .utils import build_prompt
+from .utils import get_chroma_collection
+from .utils import retrieve_relevant_chunks
+
 # -------------------------
 # Logger Setup
 # -------------------------
@@ -87,7 +91,7 @@ def general_chat_page(request):
     Returns:
         HttpResponse: Rendered HTML page (chatbot/general_chat.html).
     """
-    return render(request, "chatbot/chat.html")
+    return render(request, "chatbot/general_chat.html")
 
 
 @csrf_exempt
@@ -269,4 +273,115 @@ def general_chatbot_session_view(request, session_id=None):
         return JsonResponse(
             {"error": "Something went wrong. Please try again later."},
             status=400,
+        )
+
+
+@csrf_exempt
+def assistant_chat_page(request):
+    """
+    Render the chat UI with optional history based on session_id.
+    """
+    return render(
+        request,
+        "chatbot/knowledge_base_chat.html",
+        {"platform_name": settings.PLATFORM_NAME},
+    )
+
+
+@csrf_exempt
+def assistant_chatbot_view(request, session_id=None):
+    """
+    Returns JSON chat history.
+    If no session_id, create a new session and return empty history with new session_id.
+    """
+    # ------------------------------------------------------------------
+    # GET → return history
+    # ------------------------------------------------------------------
+    if request.method == "GET":
+        if session_id:
+            messages = Chat.objects.filter(session__session_id=session_id).order_by(
+                "created_at"
+            )
+            history = [
+                {"role": message.message_by.lower(), "message": message.message}
+                for message in messages
+            ]
+            return JsonResponse({"history": history, "session_id": session_id})
+        else:
+            # create new session
+            new_session_id = str(uuid.uuid4())
+            ChatSession.objects.create(session_id=new_session_id)
+            return JsonResponse({"history": [], "session_id": new_session_id})
+
+    # ------------------------------------------------------------------
+    # POST → process message
+    # ------------------------------------------------------------------
+    elif request.method == "POST":
+        try:
+            payload = json.loads(request.body)
+            user_msg = payload.get("question", "").strip()
+            session_id = payload.get("session_id")
+            if not user_msg:
+                return JsonResponse({"error": "Empty message"}, status=400)
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        # Get or create session
+        chat_session, created = ChatSession.objects.get_or_create(
+            session_id=session_id or str(uuid.uuid4()),
+            defaults={"label": user_msg, "last_interaction": timezone.now()},
+        )
+        if created:
+            session_id = chat_session.session_id
+
+        # Retrieve relevant chunks from ChromaDB
+        collection = get_chroma_collection()
+        relevant_chunks = retrieve_relevant_chunks(collection, user_msg, top_k=5)
+
+        # Save user message
+        Chat.objects.create(
+            session=chat_session, message_by=MessageBy.USER, message=user_msg
+        )
+
+        # Build prompt including previous conversation
+        prompt = build_prompt(user_msg, relevant_chunks, chat_session=chat_session)
+
+        # Call Groq LLM
+        client = Groq(api_key=settings.GROQ_API_KEY)
+        # You can swap the model name – e.g. "llama3-70b-8192"
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",  # <-- change to the model you prefer
+            messages=prompt,
+            temperature=0.2,
+            max_tokens=1024,
+            stream=False,
+        )
+
+        # after you get LLM answer
+        answer = response.choices[0].message.content
+
+        # convert markdown to html
+        answer_html = markdown2.markdown(
+            answer,
+            extras=[
+                "fenced-code-blocks",
+                "tables",
+                "cuddled-lists",
+                "break-on-newline",
+            ],
+        )
+
+        # Save assistant response
+        Chat.objects.create(
+            session=chat_session, message_by=MessageBy.ASSISTANT, message=answer_html
+        )
+        chat_session.last_interaction = timezone.now()
+        chat_session.save()
+
+        return JsonResponse(
+            {
+                "answer": answer_html,
+                "session_id": chat_session.session_id,
+            },
+            status=200,
         )

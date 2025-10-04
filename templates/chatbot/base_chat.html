@@ -249,16 +249,28 @@
     </div>
 
     <div id="chat-box">
-        {% for msg in history %}
-        <div class="msg {{ msg.role }}">
-            <div class="bubble">{{ msg.message|safe }}</div>
-        </div>
-        {% endfor %}
+      {% for msg in history %}
+      <div class="msg {{ msg.role }}">
+          {% if msg.role == "assistant" %}
+              <div class="avatar">{% block bot_avatar %}🤖tr{% endblock %}</div>
+          {% else %}
+              <div class="spacer"></div>
+          {% endif %}
+
+          <div class="bubble">{{ msg.message|safe }}</div>
+
+          {% if msg.role == "user" %}
+              <div class="avatar">{% block user_avatar %}🧑hj{% endblock %}</div>
+          {% else %}
+              <div class="spacer"></div>
+          {% endif %}
+      </div>
+      {% endfor %}
     </div>
 
     <form id="chat-form" action="#" method="post" autocomplete="off">
-        <input type="text" id="question-input" placeholder="{% block input_placeholder %}Ask something…{% endblock %}" required />
-        <button type="submit" class="button-primary">{% block submit_button %}Send{% endblock %}</button>
+      <input type="text" id="question-input" placeholder="{% block input_placeholder %}Ask something…{% endblock %}" required />
+      <button type="submit" class="button-primary">{% block submit_button %}Send{% endblock %}</button>
     </form>
 
     <script src="{% static '/chatbot/js/chat.js' %}"></script>
